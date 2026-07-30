@@ -1,0 +1,141 @@
+{
+  "dependencies": [
+    {
+      "name": "flask",
+      "version": "2.0.1",
+      "vulns": [
+        {
+          "id": "GHSA-m2qf-hxjv-5gpq",
+          "aliases": ["CVE-2023-30861"],
+          "fix_versions": ["2.2.5", "2.3.2"],
+          "description": "Flask may respond with a cached session cookie belonging to another user when a proxy caches a response that sets a cookie and the Vary header is not set correctly."
+        }
+      ]
+    },
+    {
+      "name": "werkzeug",
+      "version": "2.0.3",
+      "vulns": [
+        {
+          "id": "GHSA-xg9f-g7g7-2323",
+          "aliases": ["CVE-2023-25577"],
+          "fix_versions": ["2.2.3"],
+          "description": "Werkzeug multipart form data parser allocates memory per part without bound, allowing denial of service."
+        },
+        {
+          "id": "GHSA-2g68-c3qc-8985",
+          "aliases": ["CVE-2024-34069"],
+          "fix_versions": ["3.0.3"],
+          "description": "Werkzeug debugger may allow remote code execution when the host header is attacker-controlled and the PIN is bypassed."
+        }
+      ]
+    },
+    {
+      "name": "jinja2",
+      "version": "3.0.3",
+      "vulns": [
+        {
+          "id": "GHSA-h5c8-rqwp-cp95",
+          "aliases": ["CVE-2024-22195"],
+          "fix_versions": ["3.1.3"],
+          "description": "Jinja2 xmlattr filter accepts keys containing spaces and other characters, permitting attribute injection."
+        }
+      ]
+    },
+    {
+      "name": "urllib3",
+      "version": "1.26.4",
+      "vulns": [
+        {
+          "id": "GHSA-v845-jxx5-vc9f",
+          "aliases": ["CVE-2023-43804"],
+          "fix_versions": ["1.26.17"],
+          "description": "urllib3 does not strip the Cookie header on cross-origin redirects."
+        },
+        {
+          "id": "GHSA-g4mx-q9vg-27p4",
+          "aliases": ["CVE-2023-45803"],
+          "fix_versions": ["1.26.18"],
+          "description": "urllib3 does not remove the request body when a redirect changes the method to GET."
+        }
+      ]
+    },
+    {
+      "name": "idna",
+      "version": "2.10",
+      "vulns": [
+        {
+          "id": "GHSA-jjg7-2v4v-x38h",
+          "aliases": ["CVE-2024-3651"],
+          "fix_versions": ["3.7"],
+          "description": "idna.encode may take a quadratic amount of time on specially crafted inputs, enabling denial of service."
+        }
+      ]
+    },
+    {
+      "name": "certifi",
+      "version": "2021.5.30",
+      "vulns": [
+        {
+          "id": "GHSA-43fp-rhv2-5gv8",
+          "aliases": ["CVE-2022-23491"],
+          "fix_versions": ["2022.12.7"],
+          "description": "certifi bundles root certificates from TrustCor, whose ownership raised trust concerns."
+        },
+        {
+          "id": "GHSA-xqr8-7jwr-rhp7",
+          "aliases": ["CVE-2023-37920"],
+          "fix_versions": ["2023.7.22"],
+          "description": "certifi bundles e-Tugra root certificates that were removed following a security incident."
+        }
+      ]
+    },
+    {
+      "name": "pygments",
+      "version": "2.6.1",
+      "vulns": [
+        {
+          "id": "GHSA-pq64-v7f5-gqh8",
+          "aliases": ["CVE-2021-27291"],
+          "fix_versions": ["2.7.4"],
+          "description": "Pygments regular expressions in multiple lexers are vulnerable to ReDoS on crafted input. NOTE: for baobao-batch-worker this dependency is NOT reachable from any runtime code path — see SEEDED-VULNERABILITIES.md, CVE scenario 7."
+        }
+      ]
+    },
+    {
+      "name": "requests",
+      "version": "2.25.1",
+      "vulns": [
+        {
+          "id": "GHSA-j8r2-6x86-q33q",
+          "aliases": ["CVE-2023-32681"],
+          "fix_versions": ["2.31.0"],
+          "description": "requests leaks the Proxy-Authorization header to the destination server on cross-origin redirects. Also reported by the Trivy image scan — the two collapse to one finding."
+        }
+      ]
+    },
+    {
+      "name": "gunicorn",
+      "version": "20.1.0",
+      "vulns": [
+        {
+          "id": "GHSA-w3h3-4rj7-4ph4",
+          "aliases": ["CVE-2024-1135"],
+          "fix_versions": ["22.0.0"],
+          "description": "gunicorn improperly validates Transfer-Encoding headers, enabling HTTP request smuggling. Also reported by the Trivy image scan — the two collapse to one finding."
+        }
+      ]
+    },
+    {
+      "name": "sqlalchemy",
+      "version": "1.4.46",
+      "vulns": []
+    },
+    {
+      "name": "pyyaml",
+      "version": "6.0.1",
+      "vulns": []
+    }
+  ],
+  "fixes": []
+}

@@ -1,0 +1,256 @@
+# Promotion chain: test → staging → production.
+#
+# Each stage is a GitHub Environment, which is what makes the gates real:
+#
+#   test        auto on merge, no gate
+#   staging     GATE 2 — CAB / e-CAB, released from the Ba0Ba0 UI
+#   production  GATE 3 — business sign-off, released from the Ba0Ba0 UI
+#
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ THE ONE THING THIS WORKFLOW EXISTS TO PROVE (POC-PLAN.md §4).              │
+# │                                                                            │
+# │ The `production` environment carries BOTH gate mechanisms:                 │
+# │                                                                            │
+# │  1. a CUSTOM DEPLOYMENT PROTECTION RULE owned by the Ba0Ba0 GitHub App —   │
+# │     GitHub POSTs `deployment_protection_rule` to Ba0Ba0's webhook and      │
+# │     WAITS (up to 30 days).  The CAB approval clicked in the Ba0Ba0 UI is   │
+# │     what releases this job.  That is the demo.                             │
+# │  2. native REQUIRED REVIEWERS — the familiar GitHub trail auditors know.   │
+# │                                                                            │
+# │ Neither is configured here: protection rules live on the environment, not  │
+# │ in workflow YAML.  Custom rules are public preview and must be enabled     │
+# │ per-environment by a repo admin AFTER the App is installed — Terraform's   │
+# │ github_repository_environment does not manage this.  Budget the manual     │
+# │ step (POC-PLAN.md §12, risks).                                             │
+# └────────────────────────────────────────────────────────────────────────────┘
+#
+# Week-4 migration replaces each deploy job body with
+# BAOBAO_ORG/baobao-workflows/.github/workflows/deploy.yml@main.
+
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image-tag:
+        description: "Image tag to deploy (defaults to the current commit)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write        # Azure OIDC — no stored secrets
+  deployments: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false      # never cancel a deploy waiting on a human gate
+
+env:
+  # Consumed by .github/scripts/*.sh.  All non-secret coordinates, so they live in
+  # repository variables rather than secrets — the only credential in this workflow is
+  # the OIDC token, which is minted per-job and expires.
+  APP_NAME: baobao-batch-worker
+  AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  BAOBAO_INGEST_URL: ${{ vars.BAOBAO_INGEST_URL }}
+
+jobs:
+  resolve:
+    name: resolve image tag
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: |
+          if [ -n "${{ inputs.image-tag }}" ]; then
+            echo "tag=${{ inputs.image-tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    name: deploy → test
+    needs: [resolve]
+    runs-on: ubuntu-latest
+    environment:
+      name: test
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: deploy
+        name: Create revision
+        run: |
+          bash .github/scripts/deploy-revision.sh \
+            --env test \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --weight 100
+
+      - name: Smoke test
+        run: |
+          python3 scripts/smoke.py \
+            --base-url "${{ steps.deploy.outputs.url }}" \
+            --expect-tag "${{ needs.resolve.outputs.tag }}"
+
+      - name: Roll back on failure
+        if: failure()
+        run: bash .github/scripts/rollback.sh --env test
+
+  staging:
+    # GATE 2 — CAB / e-CAB.  Released from the Ba0Ba0 UI.
+    name: deploy → staging
+    needs: [resolve, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - id: deploy
+        run: |
+          bash .github/scripts/deploy-revision.sh \
+            --env staging \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --weight 100
+
+      - name: Smoke test
+        run: |
+          python3 scripts/smoke.py \
+            --base-url "${{ steps.deploy.outputs.url }}" \
+            --expect-tag "${{ needs.resolve.outputs.tag }}"
+
+      - name: Batch job dry run
+        # Staging is where the Container Apps JOB shape gets exercised, not just the
+        # long-lived app — the job is how this service actually runs in production.
+        run: |
+          az containerapp job start \
+            --name "${{ env.APP_NAME }}-job-staging" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"
+
+      - name: Roll back on failure
+        if: failure()
+        run: bash .github/scripts/rollback.sh --env staging
+
+  production:
+    # GATE 3 — business sign-off, AND the custom deployment protection rule.
+    #
+    # When this job is reached, GitHub calls Ba0Ba0's webhook and pauses.  Watch it sit
+    # "waiting" on github.com while the CAB screen in Ba0Ba0 holds the decision — that
+    # is the moment the demo is built around.
+    name: deploy → production (canary)
+    needs: [resolve, staging]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Canary 10 → 50 → 100, smoke-tested at each step.  Requires the Container App to
+      # have been created in MULTIPLE REVISION MODE — otherwise traffic splitting is
+      # unavailable and this fails at the first weight change (POC-PLAN.md §5 gotcha).
+      # That is a `baobao-infra` Terraform setting, not something this workflow can fix.
+      - id: deploy
+        name: Canary 10%
+        run: |
+          bash .github/scripts/deploy-revision.sh \
+            --env production \
+            --tag "${{ needs.resolve.outputs.tag }}" \
+            --weight 10
+
+      - name: Smoke test at 10%
+        run: |
+          python3 scripts/smoke.py \
+            --base-url "${{ steps.deploy.outputs.url }}" \
+            --expect-tag "${{ needs.resolve.outputs.tag }}"
+
+      - name: Canary 50%
+        run: bash .github/scripts/set-weight.sh --env production --weight 50
+
+      - name: Soak
+        run: sleep 60
+
+      - name: Smoke test at 50%
+        run: |
+          python3 scripts/smoke.py \
+            --base-url "${{ steps.deploy.outputs.url }}" \
+            --expect-tag "${{ needs.resolve.outputs.tag }}"
+
+      - name: Full traffic
+        run: bash .github/scripts/set-weight.sh --env production --weight 100
+
+      - name: Final health check
+        run: python3 scripts/smoke.py --base-url "${{ steps.deploy.outputs.url }}"
+
+      # CVE scenario 8's safety net.  Any failure above — smoke test, health check,
+      # weight change — shifts 100% of traffic back to the previous revision and
+      # reports `rolled_back` to Ba0Ba0, which moves the change to the rolled_back state.
+      - name: Automatic rollback
+        if: failure()
+        run: |
+          bash .github/scripts/rollback.sh --env production
+          echo "🔁 **Rolled back** — production traffic returned to the previous revision." >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: report closure to Ba0Ba0
+    needs: [resolve, test, staging, production]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same OIDC-only authentication as scan.yml's ingest job — no shared secret.
+      - id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('api://baobao')
+            core.setSecret(token)
+            core.setOutput('token', token)
+
+      - name: POST deployment outcome
+        env:
+          ENDPOINT: ${{ vars.BAOBAO_DEPLOY_URL }}
+          TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          if [ -z "$ENDPOINT" ]; then
+            echo "BAOBAO_DEPLOY_URL not set — skipping closure report"
+            exit 0
+          fi
+          payload=$(jq -nc \
+            --arg repo "${{ github.repository }}" \
+            --arg tag "${{ needs.resolve.outputs.tag }}" \
+            --arg run "${{ github.run_id }}" \
+            --arg test "${{ needs.test.result }}" \
+            --arg staging "${{ needs.staging.result }}" \
+            --arg production "${{ needs.production.result }}" \
+            '{repo:$repo, imageTag:$tag, workflowRunId:$run,
+              environments:{test:$test, staging:$staging, production:$production}}')
+          curl -sS -X POST "$ENDPOINT" \
+            -H "authorization: Bearer $TOKEN" \
+            -H "content-type: application/json" \
+            -d "$payload"

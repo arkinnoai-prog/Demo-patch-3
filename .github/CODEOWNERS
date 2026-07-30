@@ -1,0 +1,28 @@
+# GATE 1 — code review (POC-PLAN.md §9).
+#
+# The App Owner / Dev Lead persona reviews every AI-authored patch here.  Ba0Ba0's
+# in-app code-review approval posts a real GitHub PR review as this reviewer, which is
+# what makes Gate 1 a genuine block rather than a screen.
+#
+# Replace BAOBAO_ORG with the confirmed org name (POC-PLAN.md Prerequisites, item 1).
+
+*                       @BAOBAO_ORG/app-owners
+
+# Security-sensitive paths get the security team as well.  app/jobs/archive.py holds
+# the seeded CWE-22, and POC-PLAN.md §7 makes human review of SAST fixes mandatory —
+# never auto-merge a logic change.
+/app/jobs/archive.py    @BAOBAO_ORG/app-owners @BAOBAO_ORG/sec
+/tests/security/        @BAOBAO_ORG/app-owners @BAOBAO_ORG/sec
+
+# The seed manifest defines what the demo is supposed to find.  Changing it changes the
+# acceptance criteria, so it needs the security team's eyes.
+/.baobao/               @BAOBAO_ORG/sec
+
+# Patch targets for the mechanical channels.  Dependency and base-image bumps are the
+# routine path; they still need an owner's approval, which is the point of Gate 1.
+/Dockerfile             @BAOBAO_ORG/app-owners
+/requirements.txt       @BAOBAO_ORG/app-owners
+
+# Pipeline changes are infra's call, and the AI patch agent's file allowlist forbids it
+# from touching CI config at all (POC-PLAN.md §7 guardrails).
+/.github/               @BAOBAO_ORG/infra

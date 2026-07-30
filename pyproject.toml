@@ -1,0 +1,91 @@
+[project]
+name = "baobao-batch-worker"
+version = "1.0.0"
+description = "Scanner-report ingestion batch worker — Ba0Ba0 POC target repo (POC-PLAN.md §1, repo 3)"
+requires-python = ">=3.10"
+
+# NOTE: runtime dependencies are deliberately NOT declared here.  They live in
+# requirements.txt, and they stay there.
+#
+# requirements.txt is not just a dependency list in this repo — it is a *patch target*.
+# POC-PLAN.md §1 names "`requirements.txt` bump" as one of this repo's two remediation
+# channels, and .baobao/seed.json, .baobao/patch-targets.md, scripts/reseed.py and
+# scan.yml's `pip-audit --requirement requirements.txt` all read it as the source of
+# truth.  Moving the pins into `[project].dependencies` would quietly break the scenario
+# this repo exists to demonstrate.
+#
+# It is also already a lockfile: every pin is an exact `==`.  So there is no uv.lock —
+# `uv lock` resolves `[project].dependencies`, which is intentionally empty.
+#
+# uv is used as the installer and runner:
+#     uv venv --python 3.11
+#     uv pip install -r requirements-dev.txt
+#     uv run pytest
+
+[tool.uv]
+# This project is an application, not a distributable package — there is nothing to
+# build or install into the environment.  Without this, `uv run` may try to build the
+# project and sync `[project].dependencies` (empty), which would prune the packages
+# installed from requirements.txt.
+package = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# The `-m` filter is the important line.
+#
+# Two marked suites are excluded from the default run, for opposite reasons:
+#
+#   security  asserts the FIXED behaviour of a seeded vulnerability, so it FAILS on
+#             `main` by design and PASSES on a patch branch.  ci.yml's
+#             verify-vulnerable job runs it and treats the transition as evidence.
+#   seed      asserts the seeded vulnerabilities are still PRESENT, so it does the
+#             exact opposite — passes on `main`, fails on a patch branch.
+#
+# They must not share a marker: `pytest -m security` has to be able to go green on a
+# patch branch, which it cannot do if a seed-still-present check rides along with it.
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "-m", "not security and not seed",
+]
+
+markers = [
+    "security: red-then-green proof tests for seeded vulnerabilities; RED on main, GREEN once patched. Run with `pytest -m security`",
+    "seed: guards that the deliberate vulnerabilities are still in place; GREEN on main, RED once patched. Run with `pytest -m seed`",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/cli.py"]
+
+[tool.coverage.report]
+skip_empty = true
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
+
+[tool.ruff]
+line-length = 100
+# py310, not py311 — matches `requires-python` above.  The deployed runtime is 3.11, but
+# the code stays 3.10-compatible so it can be run and debugged on whatever a laptop has.
+# (Without this, ruff rewrites `timezone.utc` to `datetime.UTC` and the 3.10 run breaks.)
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+ignore = [
+    "S101",  # assert — used throughout the test suite
+    "S104",  # binding 0.0.0.0 — required inside a container
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The seeded CWE-22.  Silencing it here rather than deleting the rule keeps the linter
+# usable while the vulnerability is intentionally present; Bandit and CodeQL still
+# report it in scan.yml, which is where Ba0Ba0 picks it up.
+"app/jobs/archive.py" = ["S202"]
+"tests/**" = ["S", "B011"]
+"scripts/**" = ["S"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "build"]

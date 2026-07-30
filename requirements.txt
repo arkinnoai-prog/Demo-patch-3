@@ -1,0 +1,37 @@
+# baobao-batch-worker — runtime dependencies
+#
+# ⚠️  DELIBERATELY VULNERABLE PINS.  This is a Ba0Ba0 POC target repo (POC-PLAN.md §1).
+#     Every version below is a real release with a real published advisory.  They exist
+#     so the patch pipeline has something true to find, fix and verify.
+#     See SEEDED-VULNERABILITIES.md and .baobao/seed.json.
+#
+#     Do NOT "helpfully" bump these by hand — `scripts/reseed.py` restores them, and the
+#     whole point is that Ba0Ba0 raises the PR that bumps them.
+
+# --- web layer -------------------------------------------------------------
+Flask==2.0.1              # CVE-2023-30861  — session cookie cached by a proxy
+Werkzeug==2.0.3           # CVE-2023-25577, CVE-2023-46136, CVE-2024-34069
+Jinja2==3.0.3             # CVE-2024-22195, CVE-2024-34064, CVE-2025-27516
+MarkupSafe==2.0.1
+itsdangerous==2.0.1
+click==8.0.4
+gunicorn==20.1.0          # CVE-2024-1135, CVE-2024-6827 — request smuggling
+
+# --- http client -----------------------------------------------------------
+requests==2.25.1          # CVE-2023-32681 — Proxy-Authorization leaked on redirect
+urllib3==1.26.4           # CVE-2021-33503, CVE-2023-43804, CVE-2023-45803
+idna==2.10                # CVE-2024-3651 — quadratic complexity DoS
+certifi==2021.5.30        # CVE-2022-23491, CVE-2023-37920 — removed root CAs
+chardet==4.0.0
+
+# --- data ------------------------------------------------------------------
+PyYAML==6.0.1
+SQLAlchemy==1.4.46
+psycopg2-binary==2.9.9
+
+# --- SCENARIO 7: false positive / risk-accepted ---------------------------
+# Pygments is flagged by SCA (CVE-2021-27291, ReDoS) but is NOT imported by any
+# runtime code path in this service.  It is unreachable.  The expected outcome is a
+# recorded risk acceptance with an expiry — not a patch.  Do not remove it: removing
+# it deletes the scenario.
+Pygments==2.6.1

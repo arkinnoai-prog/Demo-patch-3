@@ -1,0 +1,22 @@
+# Test / lint dependencies.
+#
+# Kept CURRENT, unlike requirements.txt — only runtime deps carry seeded
+# vulnerabilities.  A vulnerable test harness would add findings that are never
+# deployed anywhere, which pads the finding list without proving anything.
+#
+# This file is deliberately tiny, because anything installed alongside the seeded
+# runtime pins has to tolerate them:
+#
+#  * `responses` (the obvious choice for HTTP mocking) requires requests ≥2.30 in every
+#    maintained release, which the seeded requests==2.25.1 forbids.  `tests/unit/
+#    test_report.py` stubs `requests.post` directly instead — a dozen lines, and it
+#    keeps `pip install -r requirements-dev.txt` resolvable on the vulnerable pins.
+#    That resolvability matters: a demo target nobody can install is a demo blocker.
+#  * The scanners (bandit, pip-audit) are NOT listed.  They pull large dependency trees
+#    that fight the seeded pins for no benefit; scan.yml installs each into its own
+#    isolated job step.
+-r requirements.txt
+
+pytest==8.3.4
+pytest-cov==6.0.0
+ruff==0.8.4

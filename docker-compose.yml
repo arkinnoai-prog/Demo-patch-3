@@ -1,0 +1,58 @@
+# Local development against PostgreSQL — the only database this worker uses.
+#
+# The estate runs this against the SHARED Azure PostgreSQL Flexible Server — the same
+# server baobao-payments-api uses.  That sharing is deliberate (POC-PLAN.md §1): it is
+# what gives the impact-analysis screen a genuine blast radius when the IaC scenario
+# hardens the server.  Compose reproduces that shape locally.
+#
+#   docker compose up --build          API on http://localhost:8080
+#   docker compose up -d postgres      just the DB, for `pytest` / `app.cli run` on the host
+#   docker compose run --rm job        one batch run, then exit
+#   docker compose down -v             reset everything
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: baobao
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_DB: baobao
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baobao"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    build: .
+    environment:
+      APP_ENV: local
+      IMAGE_TAG: compose
+      DATABASE_URL: postgresql+psycopg2://baobao:localdev@postgres:5432/baobao
+      BAOBAO_INGEST_URL: ""
+      LOG_LEVEL: INFO
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The Container Apps JOB shape: same image, batch entrypoint, exits when done.
+  job:
+    build: .
+    profiles: [job]
+    command: ["python", "-m", "app.cli", "run", "--manifest", "samples/job-manifest.yaml"]
+    environment:
+      APP_ENV: local
+      DATABASE_URL: postgresql+psycopg2://baobao:localdev@postgres:5432/baobao
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,13 @@
+# Normalise line endings to LF in the repo and on checkout, so shell scripts, Python and
+# the Dockerfile behave identically on Windows, on the Linux CI runners, and inside the
+# container image.
+* text=auto eol=lf
+
+# Explicit binaries (none today, but keeps future assets from being mangled).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

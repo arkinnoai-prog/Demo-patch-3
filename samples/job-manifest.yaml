@@ -1,0 +1,39 @@
+# Nightly scanner-report ingestion.
+#
+# Committed with local `path:` sources so `python -m app.cli run` works immediately
+# after a clone, with no cloud credentials and no scanners installed.  In the estate,
+# scan.yml rewrites these to `url:` (the Ba0Ba0 artifact store) or `archive:` (an
+# actions/upload-artifact bundle).
+
+job:
+  name: nightly-scan-ingest
+  schedule: "0 2 * * *"        # informational — the real schedule lives on the
+                               # Azure Container Apps Job cron trigger
+  fail_on_source_error: false  # one unreadable artifact must not lose the other repos
+
+sources:
+  # Scenario 3 — this repo's own image.  os-pkgs findings on a container image route
+  # to `base_image_bump`: mechanical, no LLM.
+  - id: batch-worker-image
+    repo: baobao-batch-worker
+    kind: trivy
+    path: samples/trivy-batch-worker-image.json
+
+  # This repo's Python dependencies — the seeded requirements.txt pins.
+  - id: batch-worker-pip
+    repo: baobao-batch-worker
+    kind: pip-audit
+    path: samples/pip-audit-batch-worker.json
+
+  # A second repo, so dedupe and per-repo aggregation are exercised by a plain run
+  # and the dashboard has more than one asset to correlate against.
+  - id: payments-api-fs
+    repo: baobao-payments-api
+    kind: trivy
+    path: samples/trivy-payments-api-fs.json
+
+sink:
+  # Left blank so a local run persists but posts nothing.  scan.yml sets
+  # BAOBAO_INGEST_URL, which takes precedence over this value.
+  endpoint: ""
+  batch_size: 50

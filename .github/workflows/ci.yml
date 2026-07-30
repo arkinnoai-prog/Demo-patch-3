@@ -1,0 +1,313 @@
+# Test → prove-the-vulnerability → build.
+#
+# Week-4 migration (POC-PLAN.md §5) replaces the `test` and `build` jobs with calls to
+# BAOBAO_ORG/baobao-workflows/.github/workflows/{test,build}.yml@main.  The
+# `verify-vulnerable` job stays here — it is specific to this repo's seeds.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  packages: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      # `uv tool run` fetches and runs ruff without creating an environment at all.
+      - run: uv tool run ruff@0.8.4 check app tests scripts
+      - run: uv tool run ruff@0.8.4 format --check app tests scripts
+        continue-on-error: true
+
+  frontend:
+    name: frontend build + npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build the SPA
+        working-directory: frontend
+        run: npm run build
+
+      # npm audit is a scan surface, not a gate — a vulnerable JS dep is a finding for the
+      # pipeline to raise, not a reason to fail the build.  Recorded as an artifact.
+      - name: npm audit
+        working-directory: frontend
+        continue-on-error: true
+        run: npm audit --audit-level=none --json | tee ../npm-audit.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit
+          path: npm-audit.json
+          if-no-files-found: warn
+
+  test:
+    name: unit + api
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the deployed runtime; 3.12 is the forward-compatibility canary, so a
+        # dependency bump that only breaks on a newer interpreter is caught here rather
+        # than at the next base-image bump.
+        python-version: ["3.11", "3.12"]
+    # The suite and the CLI smoke run against a real PostgreSQL, the same engine used in
+    # the estate — there is no SQLite fallback.  conftest.py gives each test its own
+    # schema on this database; the CLI steps point DATABASE_URL at it directly.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: baobao
+          POSTGRES_PASSWORD: localdev
+          POSTGRES_DB: baobao
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U baobao"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://baobao:localdev@localhost:5432/baobao
+      DATABASE_URL: postgresql+psycopg2://baobao:localdev@localhost:5432/baobao
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      - name: Create the environment
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install -r requirements-dev.txt
+
+      - name: pytest (security tests excluded by pyproject addopts)
+        run: |
+          uv run pytest --junitxml=junit-${{ matrix.python-version }}.xml \
+                        --cov=app --cov-report=xml --cov-report=term-missing
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ matrix.python-version }}
+          path: |
+            junit-${{ matrix.python-version }}.xml
+            coverage.xml
+          if-no-files-found: warn
+
+      - name: CLI smoke — the job must actually run
+        run: |
+          uv run python -m app.cli check
+          uv run python -m app.cli run --manifest samples/job-manifest.yaml --dry-run
+
+  verify-vulnerable:
+    # ─────────────────────────────────────────────────────────────────────────
+    # POC-PLAN.md §6 step 2 — "then prove it".
+    #
+    # Grades the red-then-green transition PER SEEDED CODE VULNERABILITY (tar-slip and
+    # SQL injection).  Each seed is judged on its OWN sink and its OWN tests, so a patch
+    # PR that fixes one seed is not marked "incomplete" because the other is still seeded
+    # — that is the whole point of the demo, where seeds are patched one PR at a time.
+    #
+    # It also catches the failure mode where the AI writes a security test that passes
+    # trivially: on the pre-patch commit that seed's tests MUST fail.
+    # ─────────────────────────────────────────────────────────────────────────
+    name: prove the seeded vulnerabilities
+    runs-on: ubuntu-latest
+    # The SQL-injection security tests hit the database, so this job needs Postgres too.
+    # (The tar-slip tests do not, but a single service covers both.)
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: baobao
+          POSTGRES_PASSWORD: localdev
+          POSTGRES_DB: baobao
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U baobao"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://baobao:localdev@localhost:5432/baobao
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      - name: Create the environment
+        run: |
+          uv venv
+          uv pip install -r requirements-dev.txt
+
+      - name: Red-then-green, per seed
+        run: |
+          set -u
+          fail=0
+          grade() {
+            slug="$1"; label="$2"; sink_file="$3"; sink_pat="$4"; test_path="$5"
+            if grep -qF "$sink_pat" "$sink_file"; then state=vulnerable; else state=patched; fi
+            if uv run pytest -m security "$test_path" --junitxml="junit-$slug.xml" -q; then
+              outcome=success
+            else
+              outcome=failure
+            fi
+            echo "· $label — sink=$state, tests=$outcome"
+            if [ "$state" = vulnerable ] && [ "$outcome" = success ]; then
+              echo "::error::[$label] security tests PASSED while the sink is present — the test proves nothing."
+              echo "🔴 **$label — RED expected, got GREEN** (the test does not detect the seed)" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+            elif [ "$state" = patched ] && [ "$outcome" != success ]; then
+              echo "::error::[$label] sink patched but its security tests still fail — the fix is incomplete."
+              echo "🔴 **$label — patched but still RED** (fix incomplete)" >> "$GITHUB_STEP_SUMMARY"
+              fail=1
+            elif [ "$state" = vulnerable ]; then
+              echo "🔴 **$label — RED** (seed present; tests fail as designed — the *before* half)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "🟢 **$label — GREEN** (seed fixed; tests pass — the *after* half)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          grade tar-slip      "CWE-22 tar-slip"      app/jobs/archive.py "extractall(path=dest_dir)" tests/security/test_archive_traversal.py
+          grade sql-injection "CWE-89 SQL injection" app/db.py           "LIKE '%{term}%'"           tests/security/test_sql_injection.py
+          exit "$fail"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-security
+          path: junit-*.xml
+          if-no-files-found: warn
+
+  seed-integrity:
+    name: seeds still present
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      - name: Create the environment
+        run: |
+          uv venv
+          uv pip install -r requirements-dev.txt
+
+      # Both checks report drift without failing on a PR: a Ba0Ba0 patch PR is
+      # *supposed* to drift the seed — that is the whole point of it.  They fail on
+      # `main`, where drift means someone hand-patched outside the pipeline and the next
+      # demo would find nothing to fix.
+      - name: Check seed drift (Dockerfile + requirements.txt)
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: uv run python scripts/reseed.py --check
+
+      - name: Seed guard tests
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: uv run pytest -m seed -v
+
+  build:
+    name: build + push + SBOM
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        run: echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # OIDC federated credential — no long-lived secrets in GitHub (POC-PLAN.md §5).
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${{ vars.ACR_NAME }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ vars.ACR_NAME }}.azurecr.io/baobao-batch-worker:${{ steps.meta.outputs.tag }}
+            ${{ vars.ACR_NAME }}.azurecr.io/baobao-batch-worker:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ vars.ACR_NAME }}.azurecr.io/baobao-batch-worker:${{ steps.meta.outputs.tag }}
+          format: spdx-json
+          artifact-name: sbom-${{ steps.meta.outputs.tag }}.spdx.json
+
+      - name: Post-build image re-scan (scenario 3 verification)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ vars.ACR_NAME }}.azurecr.io/baobao-batch-worker:${{ steps.meta.outputs.tag }}
+          format: json
+          output: trivy-post-build.json
+          severity: CRITICAL,HIGH
+
+      - name: Record the critical count
+        if: always()
+        run: |
+          criticals=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-post-build.json 2>/dev/null || echo "0")
+          echo "criticals=$criticals" >> "$GITHUB_STEP_SUMMARY"
+          echo "Scenario 3 gate: CRITICAL == 0 → $([ "$criticals" -eq 0 ] && echo PASS || echo 'not yet — base image still seeded')" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-post-build
+          path: trivy-post-build.json
+          if-no-files-found: warn

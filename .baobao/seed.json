@@ -1,0 +1,170 @@
+{
+  "$comment": "Machine-readable declaration of what is deliberately wrong with this repo. Ba0Ba0 reads this to assert that a scan found what it was supposed to find, and scripts/reseed.py reads it to restore the vulnerable state between demo runs.",
+  "schemaVersion": 1,
+  "repo": "baobao-batch-worker",
+  "role": "patch-target",
+  "pocPlanSection": "§1 target estate, repo 3 of 5",
+  "stack": "Python 3.11 / Flask",
+  "azureService": "Container Apps job",
+  "primaryScenario": 3,
+  "scenarios": [
+    {
+      "id": 3,
+      "class": "Container base image",
+      "detectedBy": "trivy image",
+      "channel": "base_image_bump",
+      "gates": ["code_review", "cab_review"],
+      "verifiedBy": "image re-scan reports CRITICAL == 0"
+    },
+    {
+      "id": 7,
+      "class": "False positive / risk-accepted",
+      "detectedBy": "pip-audit",
+      "channel": "none",
+      "gates": ["security_lead"],
+      "verifiedBy": "exception recorded with an expiry; no PR opened"
+    }
+  ],
+  "seeds": [
+    {
+      "id": "base-image",
+      "kind": "container_base_image",
+      "file": "Dockerfile",
+      "current": "python:3.11.4-slim-bookworm",
+      "target": "python:3.11-slim-bookworm",
+      "channel": "base_image_bump",
+      "mechanical": true,
+      "expectedFindings": [
+        "CVE-2023-45853",
+        "CVE-2023-4863",
+        "CVE-2023-4911",
+        "CVE-2023-5363",
+        "CVE-2023-31484"
+      ],
+      "expectedCriticals": 2,
+      "notes": "June 2023 build of the Debian 12 base. Bumping the tag is the entire fix; no application code changes."
+    },
+    {
+      "id": "pip-pins",
+      "kind": "vulnerable_dependencies",
+      "file": "requirements.txt",
+      "channel": "dependency_bump",
+      "mechanical": true,
+      "packages": [
+        { "name": "Flask", "pinned": "2.0.1", "fixed": "2.2.5", "advisories": ["CVE-2023-30861"] },
+        { "name": "Werkzeug", "pinned": "2.0.3", "fixed": "3.0.3", "advisories": ["CVE-2023-25577", "CVE-2023-46136", "CVE-2024-34069"] },
+        { "name": "Jinja2", "pinned": "3.0.3", "fixed": "3.1.6", "advisories": ["CVE-2024-22195", "CVE-2024-34064", "CVE-2025-27516"] },
+        { "name": "requests", "pinned": "2.25.1", "fixed": "2.32.4", "advisories": ["CVE-2023-32681"] },
+        { "name": "urllib3", "pinned": "1.26.4", "fixed": "1.26.18", "advisories": ["CVE-2021-33503", "CVE-2023-43804", "CVE-2023-45803"] },
+        { "name": "idna", "pinned": "2.10", "fixed": "3.7", "advisories": ["CVE-2024-3651"] },
+        { "name": "certifi", "pinned": "2021.5.30", "fixed": "2024.7.4", "advisories": ["CVE-2022-23491", "CVE-2023-37920"] },
+        { "name": "gunicorn", "pinned": "20.1.0", "fixed": "23.0.0", "advisories": ["CVE-2024-1135", "CVE-2024-6827"] }
+      ]
+    },
+    {
+      "id": "unreachable-dep",
+      "kind": "vulnerable_dependency_unreachable",
+      "file": "requirements.txt",
+      "package": "Pygments",
+      "pinned": "2.6.1",
+      "fixed": "2.15.0",
+      "advisories": ["CVE-2021-27291", "CVE-2022-40896"],
+      "channel": "none",
+      "mechanical": true,
+      "scenario": 7,
+      "expectedOutcome": "risk_accepted",
+      "notes": "Declared but never imported by any runtime code path. The correct outcome is a recorded exception with an expiry, not a patch. Verify with: grep -ri pygments app/"
+    },
+    {
+      "id": "tar-traversal",
+      "kind": "code_vulnerability",
+      "file": "app/jobs/archive.py",
+      "symbol": "extract_bundle",
+      "cwe": "CWE-22",
+      "pattern": "CVE-2007-4559",
+      "detectedBy": ["bandit:B202", "codeql:py/tar-slip"],
+      "channel": "ai_code_fix",
+      "mechanical": false,
+      "requiresHumanReview": true,
+      "proof": {
+        "test": "tests/security/test_archive_traversal.py",
+        "prePatch": "fail",
+        "postPatch": "pass",
+        "note": "The red-then-green evidence artifact described in POC-PLAN.md §6. Excluded from the default pytest run via the `security` marker, because the seeded state must fail it."
+      }
+    },
+    {
+      "id": "sql-injection",
+      "kind": "code_vulnerability",
+      "file": "app/db.py",
+      "symbol": "search_findings",
+      "cwe": "CWE-89",
+      "pattern": "tautology / UNION via the findings search box",
+      "detectedBy": ["bandit:B608", "codeql:py/sql-injection"],
+      "channel": "ai_code_fix",
+      "mechanical": false,
+      "requiresHumanReview": true,
+      "endpoint": "GET /api/findings?search=",
+      "proof": {
+        "test": "tests/security/test_sql_injection.py",
+        "prePatch": "fail",
+        "postPatch": "pass",
+        "note": "A payload like `x' OR '1'='1' --` in the findings search box returns every row. The parameterised fix `_search_findings_safe` is already written and unused in app/db.py, so the patch is a small diff. Added for the standalone full-stack demo; see SEEDED-VULNERABILITIES.md."
+      }
+    },
+    {
+      "id": "ssrf",
+      "kind": "code_vulnerability",
+      "file": "app/jobs/runner.py",
+      "symbol": "_load_document",
+      "cwe": "CWE-918",
+      "detectedBy": ["codeql:py/full-ssrf"],
+      "channel": "ai_code_fix",
+      "mechanical": false,
+      "requiresHumanReview": true,
+      "endpoint": "POST /api/jobs/run (inline manifest with a url: source)",
+      "notes": "A manifest source's `url` is fetched server-side with no allowlist, reachable unauthenticated — e.g. to reach cloud metadata at 169.254.169.254. Fix: validate/allowlist the host before requests.get."
+    },
+    {
+      "id": "insecure-transport",
+      "kind": "code_vulnerability",
+      "file": "app/jobs/report.py",
+      "symbol": "_post_with_retry",
+      "cwe": "CWE-295",
+      "detectedBy": ["bandit:B501", "codeql:py/request-without-cert-validation"],
+      "channel": "ai_code_fix",
+      "mechanical": false,
+      "requiresHumanReview": true,
+      "notes": "requests.post(..., verify=False) disables TLS certificate validation on the control-plane POST. Fix: remove verify=False."
+    },
+    {
+      "id": "hardcoded-credential",
+      "kind": "secret",
+      "file": "app/jobs/report.py",
+      "symbol": "_DEV_FALLBACK_TOKEN",
+      "cwe": "CWE-798",
+      "detectedBy": ["bandit:B105", "gitleaks", "trufflehog", "trivy:secret"],
+      "channel": "ai_code_fix",
+      "mechanical": false,
+      "requiresHumanReview": true,
+      "notes": "A DUMMY hardcoded bearer token used as the auth fallback in _headers(). Detected by secret scanners and Bandit B105. The value is not a live credential; the fix is to require the token from the environment."
+    },
+    {
+      "id": "flask-debug",
+      "kind": "code_vulnerability",
+      "file": "app/cli.py",
+      "symbol": "cmd_serve",
+      "cwe": "CWE-489",
+      "detectedBy": ["codeql:py/flask-debug", "semgrep:python.flask.security.audit.debug-enabled"],
+      "channel": "ai_code_fix",
+      "mechanical": false,
+      "requiresHumanReview": true,
+      "notes": "The Flask dev server is started with debug=True (Werkzeug interactive debugger = RCE). Bandit does not flag it through the app factory; CodeQL/Semgrep do. Fix: drop debug=True."
+    }
+  ],
+  "notSeeded": {
+    "xss": "baobao-customer-portal",
+    "os_packages": "baobao-legacy-vm (scenario 4)",
+    "iac_misconfiguration": "baobao-infra (scenario 5)"
+  }
+}

@@ -1,0 +1,303 @@
+# Scan → normalise → ingest into Ba0Ba0.
+#
+# POC-PLAN.md §5 puts the real body of this workflow in the central `baobao-workflows`
+# repo, consumed via `workflow_call`.  Until that repo exists this workflow is
+# self-contained and functional, so this repo is demoable on its own.  Week-4 migration
+# is a one-line replacement of the `scan` job with:
+#
+#   jobs:
+#     scan:
+#       uses: BAOBAO_ORG/baobao-workflows/.github/workflows/scan.yml@main
+#       with: { repo-name: baobao-batch-worker, language: python }
+#       secrets: inherit
+
+name: scan
+
+on:
+  schedule:
+    - cron: "0 2 * * *"        # 02:00 UTC nightly — the estate's scan cycle
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write       # upload SARIF to code scanning
+  id-token: write              # OIDC token for the Ba0Ba0 ingest call — see below
+
+env:
+  IMAGE_NAME: baobao-batch-worker
+
+jobs:
+  sca:
+    name: dependencies (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      # `continue-on-error` on every scanner in this workflow is deliberate: the
+      # seeded state HAS vulnerabilities, so a scanner exiting non-zero is the
+      # expected outcome.  The gate that matters is the CAB, not this job.
+      - name: pip-audit
+        continue-on-error: true
+        run: |
+          # `uv tool run` runs pip-audit in its own ephemeral environment.  That
+          # isolation matters here: pip-audit's own dependency tree would otherwise have
+          # to co-resolve with the deliberately-old runtime pins it is auditing — which
+          # is exactly the conflict that kept it out of requirements-dev.txt.
+          uv tool run pip-audit@2.7.3 --requirement requirements.txt \
+                                      --format json \
+                                      --output pip-audit.json \
+                                      --progress-spinner off
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit
+          path: pip-audit.json
+          if-no-files-found: warn
+
+  sast:
+    name: code (Bandit + CodeQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      - name: Bandit
+        continue-on-error: true
+        run: |
+          # Expected finding: B202 tarfile_unsafe_members in app/jobs/archive.py.
+          uv tool run bandit@1.8.0 -r app -f json -o bandit.json || true
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bandit
+          path: bandit.json
+          if-no-files-found: warn
+
+  image:
+    name: container image (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build locally rather than pulling from ACR: this job must be able to scan a
+      # pull request's proposed base-image change before it is merged, which is the
+      # whole point of the scenario-3 verification.
+      - name: Build image for scanning
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy image scan (JSON for Ba0Ba0)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:scan
+          format: json
+          output: trivy-image.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          vuln-type: os,library
+
+      - name: Trivy image scan (SARIF for code scanning)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:scan
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      # The scenario-3 acceptance gate.  Reports only on `main` and PRs; it does NOT
+      # fail the build, because the seeded state is supposed to have criticals.  After
+      # Ba0Ba0's base-image bump PR, this count must reach 0 — that is the evidence.
+      - name: Critical count (scenario 3 acceptance gate)
+        if: always()
+        run: |
+          criticals=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-image.json 2>/dev/null || echo "0")
+          echo "CRITICAL findings in the image: $criticals"
+          {
+            echo "### Trivy image scan"
+            echo ""
+            echo "| severity | count |"
+            echo "|---|---|"
+            for sev in CRITICAL HIGH MEDIUM LOW; do
+              n=$(jq --arg s "$sev" '[.Results[]?.Vulnerabilities[]? | select(.Severity==$s)] | length' trivy-image.json 2>/dev/null || echo 0)
+              echo "| $sev | $n |"
+            done
+            echo ""
+            if [ "$criticals" -eq 0 ]; then
+              echo "✅ scenario 3 gate satisfied — 0 criticals"
+            else
+              echo "⚠️ $criticals critical(s) — expected while the seeded base image is in place"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image
+          path: trivy-image.json
+          if-no-files-found: warn
+
+  filesystem:
+    name: filesystem (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-fs.json
+          severity: CRITICAL,HIGH,MEDIUM
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs
+          path: trivy-fs.json
+          if-no-files-found: warn
+
+  ingest:
+    name: ingest into Ba0Ba0
+    runs-on: ubuntu-latest
+    needs: [sca, sast, image, filesystem]
+    if: always() && github.event_name != 'pull_request'
+    # Normalisation persists to PostgreSQL — the same engine as the estate, no SQLite
+    # fallback.  A throwaway service container is the local store for this CI run; the
+    # findings also POST to Ba0Ba0 when BAOBAO_INGEST_URL is set.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: baobao
+          POSTGRES_PASSWORD: localdev
+          POSTGRES_DB: baobao
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U baobao"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "requirements*.txt"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+
+      - name: Create the environment
+        run: |
+          uv venv
+          uv pip install -r requirements.txt
+
+      # POC-PLAN.md §4, layer 2: authenticate with GitHub's OWN OIDC token, audience
+      # `api://baobao`, verified by Ba0Ba0 against GitHub's JWKS and asserting the
+      # repository / workflow_ref claims.  There is no shared secret between GitHub and
+      # Ba0Ba0 at all — nothing to rotate, nothing to leak.
+      - name: Mint a GitHub OIDC token for Ba0Ba0
+        id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('api://baobao')
+            core.setSecret(token)
+            core.setOutput('token', token)
+
+      - name: Build the ingest manifest
+        run: |
+          cat > ci-manifest.yaml <<'YAML'
+          job:
+            name: ci-scan-ingest
+            fail_on_source_error: false
+          sources:
+            - id: image-trivy
+              repo: baobao-batch-worker
+              kind: trivy
+              path: reports/trivy-image/trivy-image.json
+            - id: fs-trivy
+              repo: baobao-batch-worker
+              kind: trivy
+              path: reports/trivy-fs/trivy-fs.json
+            - id: pip
+              repo: baobao-batch-worker
+              kind: pip-audit
+              path: reports/pip-audit/pip-audit.json
+          sink:
+            endpoint: ""
+            batch_size: 50
+          YAML
+
+          # Sources that a scanner did not produce are reported as source errors and
+          # skipped, so a single scanner outage does not lose the other reports.
+          ls -R reports || true
+
+      - name: Normalise and POST to /api/ingest/scanner
+        env:
+          BAOBAO_INGEST_URL: ${{ vars.BAOBAO_INGEST_URL }}
+          BAOBAO_TOKEN: ${{ steps.oidc.outputs.token }}
+          APP_ENV: production
+          DATABASE_URL: postgresql+psycopg2://baobao:localdev@localhost:5432/baobao
+          JOB_MANIFEST: ci-manifest.yaml
+        run: |
+          uv run python -m app.cli run --manifest ci-manifest.yaml --json | tee ingest-summary.json
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Ba0Ba0 ingest"
+            echo ""
+            echo '```json'
+            cat ingest-summary.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # exit 2 means "ran, but a source or the sink failed" — surfaced, not fatal.
+          [ "$status" -le 2 ] || exit "$status"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ingest-summary
+          path: ingest-summary.json
+          if-no-files-found: warn
