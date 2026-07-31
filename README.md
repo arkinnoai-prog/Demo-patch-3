@@ -159,41 +159,36 @@ Plain code, no model call — the deterministic half of POC-PLAN.md §7. First m
 ## Tests
 
 ```bash
-pytest                  # 144 unit + api tests — green
+pytest                  # 145 unit + api tests — green (needs Postgres; see Quick start)
 pytest -m security      # RED on main by design; GREEN once patched
 pytest -m seed          # asserts the seeds are still in place — GREEN on main
 ruff check app tests scripts
 ```
 
-The `security` suite **is supposed to fail here**. It asserts the *fixed* behaviour of
-the seeded path traversal, so its failure on `main` and its pass on a patch branch is
-the red-then-green evidence in POC-PLAN.md §6. `ci.yml` asserts both halves and fails the
-build if a security test passes on the pre-patch commit.
+The `security` suite **is supposed to fail here**. It asserts the *fixed* behaviour of the
+seeded code vulnerabilities (path traversal, SQL injection), so its failure on `main` and
+its pass on a patch branch is the red-then-green evidence. These suites are run locally /
+by the client's pipeline — GitHub Actions here only deploys (see CI/CD below).
 
 ## CI/CD
 
+GitHub does exactly one thing here: **build and deploy on a tag.** The seeded
+vulnerabilities are intentional and are meant to be found by the **client's scanner
+against the deployed app**, not flagged by GitHub — so there is no scanning workflow.
+
 | Workflow | Does |
 |---|---|
-| [`scan.yml`](.github/workflows/scan.yml) | nightly + on push: pip-audit, Bandit, CodeQL, Trivy image + fs → normalise → `POST /api/ingest/scanner` |
-| [`ci.yml`](.github/workflows/ci.yml) | lint · pytest on 3.11 + 3.12 · `verify-vulnerable` (red-then-green) · seed drift · build → ACR + SBOM + re-scan |
-| [`deploy.yml`](.github/workflows/deploy.yml) | OIDC → `test` → `staging` (Gate 2) → `production` (Gate 3), canary 10→50→100%, smoke-tested at each step, auto-rollback on failure |
+| [`deploy.yml`](.github/workflows/deploy.yml) | on a `v*` tag (or manual run): build the image (React + Flask, one multi-stage Dockerfile) → push to **GHCR** → `az containerapp update` → health-check `/healthz` |
 
-Two things worth knowing:
+```
+git tag v1.0.0 && git push origin v1.0.0   →   build → GHCR → Azure Container Apps → live URL
+```
 
-- **No stored secrets anywhere.** Azure auth is OIDC federated credentials; the Ba0Ba0
-  ingest call authenticates with GitHub's *own* OIDC token (audience `api://baobao`),
-  so there is no shared secret between GitHub and Ba0Ba0 at all (POC-PLAN.md §4).
-- **The `production` gate is the demo.** GitHub calls Ba0Ba0's webhook via a **custom
-  deployment protection rule** and waits — up to 30 days. The CAB approval clicked in
-  the Ba0Ba0 UI is what releases the deploy. That rule is configured on the *environment*
-  by a repo admin after the App is installed; it cannot be set from workflow YAML or
-  Terraform, so budget the manual step.
-
-These workflows are self-contained today. POC-PLAN.md §5 moves their bodies into the
-central `baobao-workflows` repo via `workflow_call` in Week 4; each file carries the
-one-line replacement in its header. They are not `uses:`-based yet on purpose — a
-`uses:` pointing at a repo that does not exist would leave this repo un-demoable in the
-meantime.
+**No stored secrets** — Azure auth is OIDC federated credentials; the GHCR push uses the
+built-in `GITHUB_TOKEN`. The infrastructure is a reusable **Bicep** template under
+[`infra/`](infra/) that provisions a Singapore (`southeastasia`) resource group shared by
+all three demo repos. Full setup — provisioning, OIDC wiring, and the first deploy — is in
+**[DEPLOYMENT.md](DEPLOYMENT.md)**.
 
 ## Configuration
 
